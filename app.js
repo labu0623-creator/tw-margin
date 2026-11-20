@@ -69,19 +69,19 @@
     const pts = data.map((r, i) => `${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`).join(" ");
     const lines = [[166, "166 原始", "var(--line)"], [150, "150 警戒", "var(--z-warn)"], [130, "130 追繳", "var(--z-danger)"]]
       .map(([v, t, c]) => ({ v, t, c, top: y(v) / H * 100 }));
-    return `<div class="chart" style="position:relative">
+    return `<div class="chart">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(md(data[0].d))} 到 ${esc(md(data[data.length - 1].d))} 維持率走勢，最新 ${fmt(vals[vals.length - 1])}%">
         ${lines.map(l => `<line x1="0" x2="${W}" y1="${y(l.v).toFixed(1)}" y2="${y(l.v).toFixed(1)}" stroke="${l.c}" stroke-dasharray="4 5" vector-effect="non-scaling-stroke"/>`).join("")}
         <polyline fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke" points="${pts}"/>
         <line id="hoverLine" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--muted)" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>
       </svg>
-      ${lines.map(l => `<span class="tiny" style="position:absolute;right:2px;top:calc(${l.top.toFixed(1)}% - 16px)">${l.t}</span>`).join("")}
+      <div class="gutter">${lines.map(l => `<span class="tiny" style="top:${l.top.toFixed(1)}%">${l.t}</span>`).join("")}</div>
     </div>
-    <div class="card-head tiny"><span>${md(data[0].d)}</span><span id="hoverRead" aria-live="polite"></span><span>${md(data[data.length - 1].d)}</span></div>`;
+    <div class="card-head tiny" style="padding-right:72px"><span>${md(data[0].d)}</span><span id="hoverRead" aria-live="polite"></span><span>${md(data[data.length - 1].d)}</span></div>`;
   }
 
   function bindChartHover(rows, key) {
-    const box = $(".chart"); if (!box) return;
+    const box = $(".chart svg"); if (!box) return;
     const data = rows.filter(r => r[key] != null), line = $("#hoverLine"), read = $("#hoverRead");
     const move = e => {
       const rect = box.getBoundingClientRect();
@@ -125,7 +125,7 @@
               <span class="big">${fmt(r)}<span class="unit">%</span></span>
               <span class="tiny ${cls(r - rPrev)}">${rPrev != null ? sgn(r - rPrev) + " 較前日" : ""}</span>
             </div>
-            <div class="scale"><span>130 追繳</span><span>150 警戒</span><span>166 原始</span><span>200</span></div>
+            <div class="legend"><span><i style="background:var(--z-danger)"></i>130 以下 追繳</span><span><i style="background:var(--z-warn)"></i>130–150 警戒</span><span><i style="background:var(--z-safe)"></i>150 以上</span></div>
           </div>
         </section>
 
