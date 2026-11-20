@@ -60,36 +60,49 @@
     return `<svg viewBox="0 0 300 ${h}" preserveAspectRatio="none" width="100%" height="${h}" aria-hidden="true"><polyline fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" vector-effect="non-scaling-stroke" points="${pts}"/></svg>`;
   }
 
-  function chartHTML(rows, key) {
+  const RATIO_CHART = {
+    id: "r", unit: "%", label: "維持率",
+    domain: vals => [Math.min(128, ...vals) - 2, Math.max(170, ...vals) + 2],
+    lines: [[166, "166 原始", "var(--line)"], [150, "150 警戒", "var(--z-warn)"], [130, "130 追繳", "var(--z-danger)"]],
+    read: (r, v) => `${fmt(v)}%`,
+  };
+  const FEAR_CHART = {
+    id: "f", unit: "", label: "恐慌溫度",
+    domain: () => [0, 100],
+    lines: [[80, "80 恐慌", "var(--z-danger)"], [60, "60 緊張", "var(--z-warn)"], [40, "40 謹慎", "var(--line)"], [20, "20 平穩", "var(--line)"]],
+    read: (r, v) => `${Math.round(v)} ${fearLabel(v)}${r.vix ? "・VIX " + fmt(r.vix, 2) : ""}`,
+  };
+
+  function chartHTML(rows, key, o) {
     const data = rows.filter(r => r[key] != null);
     if (data.length < 2) return `<p class="tiny">資料累積中</p>`;
     const vals = data.map(r => r[key]);
-    const mn = Math.min(128, ...vals) - 2, mx = Math.max(170, ...vals) + 2;
+    const [mn, mx] = o.domain(vals);
     const W = 600, H = 200, y = v => (1 - (v - mn) / (mx - mn)) * H, x = i => i / (data.length - 1) * W;
     const pts = data.map((r, i) => `${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`).join(" ");
-    const lines = [[166, "166 原始", "var(--line)"], [150, "150 警戒", "var(--z-warn)"], [130, "130 追繳", "var(--z-danger)"]]
-      .map(([v, t, c]) => ({ v, t, c, top: y(v) / H * 100 }));
-    return `<div class="chart">
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(md(data[0].d))} 到 ${esc(md(data[data.length - 1].d))} 維持率走勢，最新 ${fmt(vals[vals.length - 1])}%">
+    const lines = o.lines.map(([v, t, c]) => ({ v, t, c, top: y(v) / H * 100 }));
+    return `<div class="chart" id="chart-${o.id}">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(md(data[0].d))} 到 ${esc(md(data[data.length - 1].d))} ${o.label}走勢，最新 ${fmt(vals[vals.length - 1])}${o.unit}">
         ${lines.map(l => `<line x1="0" x2="${W}" y1="${y(l.v).toFixed(1)}" y2="${y(l.v).toFixed(1)}" stroke="${l.c}" stroke-dasharray="4 5" vector-effect="non-scaling-stroke"/>`).join("")}
         <polyline fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke" points="${pts}"/>
-        <line id="hoverLine" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--muted)" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>
+        <line class="hl" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--muted)" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>
       </svg>
       <div class="gutter">${lines.map(l => `<span class="tiny" style="top:${l.top.toFixed(1)}%">${l.t}</span>`).join("")}</div>
     </div>
-    <div class="card-head tiny" style="padding-right:72px"><span>${md(data[0].d)}</span><span id="hoverRead" aria-live="polite"></span><span>${md(data[data.length - 1].d)}</span></div>`;
+    <div class="card-head tiny" style="padding-right:72px"><span>${md(data[0].d)}</span><span id="read-${o.id}" aria-live="polite"></span><span>${md(data[data.length - 1].d)}</span></div>`;
   }
 
-  function bindChartHover(rows, key) {
-    const box = $(".chart svg"); if (!box) return;
-    const data = rows.filter(r => r[key] != null), line = $("#hoverLine"), read = $("#hoverRead");
+  function bindChartHover(rows, key, o) {
+    const wrap = $("#chart-" + o.id); if (!wrap) return;
+    const box = $("svg", wrap), line = $(".hl", wrap), read = $("#read-" + o.id);
+    const data = rows.filter(r => r[key] != null);
     const move = e => {
       const rect = box.getBoundingClientRect();
       const t = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
       const i = Math.round(t * (data.length - 1));
       const xx = i / (data.length - 1) * 600;
       line.setAttribute("x1", xx); line.setAttribute("x2", xx); line.setAttribute("opacity", ".5");
-      read.textContent = `${md(data[i].d)}　${fmt(data[i][key])}%`;
+      read.textContent = `${md(data[i].d)}　${o.read(data[i], data[i][key])}`;
     };
     box.addEventListener("pointermove", move);
     box.addEventListener("pointerdown", move);
@@ -111,6 +124,9 @@
     const rangeN = st.range === "all" ? days.length : +st.range;
     const rows = days.slice(-rangeN);
     const vixPrev = prev.vix;
+    const rangeSeg = `<div class="seg small" role="group" aria-label="期間">
+            ${[["30", "30 日"], ["90", "90 日"], ["all", "全部"]].map(([k, t]) => `<button data-range="${k}" aria-pressed="${st.range === k}">${t}</button>`).join("")}
+          </div>`;
 
     view.innerHTML = `
       <div class="seg" role="group" aria-label="市場">
@@ -156,20 +172,29 @@
         </section>
       </div>
 
+      <div class="grid cols2">
+      <section class="card">
+        <div class="card-head" style="flex-wrap:wrap">
+          <h2 class="section">恐慌溫度走勢</h2>
+          ${rangeSeg}
+        </div>
+        ${chartHTML(rows, "fear", FEAR_CHART)}
+      </section>
+
       <section class="card">
         <div class="card-head" style="flex-wrap:wrap">
           <h2 class="section">${mname}維持率走勢</h2>
-          <div class="seg small" role="group" aria-label="期間">
-            ${[["30", "30 日"], ["90", "90 日"], ["all", "全部"]].map(([k, t]) => `<button data-range="${k}" aria-pressed="${st.range === k}">${t}</button>`).join("")}
-          </div>
+          ${rangeSeg}
         </div>
-        ${chartHTML(rows, rk)}
+        ${chartHTML(rows, rk, RATIO_CHART)}
       </section>
+      </div>
       <p class="note">民間算法＝融資股票市值 ÷ 融資金額，反映單純做多的融資戶壓力；官方數字以整戶計算，兩者定義不同。資料為盤後公布，非即時。</p>`;
 
     view.querySelectorAll("[data-mkt]").forEach(b => b.onclick = () => { st.mkt = b.dataset.mkt; remember("mkt", st.mkt); renderOverview(); });
     view.querySelectorAll("[data-range]").forEach(b => b.onclick = () => { st.range = b.dataset.range; remember("range", st.range); renderOverview(); });
-    bindChartHover(rows, rk);
+    bindChartHover(rows, "fear", FEAR_CHART);
+    bindChartHover(rows, rk, RATIO_CHART);
   }
 
   // ---------- 畫面：個股

@@ -122,6 +122,7 @@ h2.section { font-size: 15px; font-weight: 600; }
   .tabs-desktop { display: flex; gap: 4px; background: var(--soft); border-radius: 12px; padding: 4px; }
   .tabs-desktop a { height: 36px; padding: 0 16px; display: inline-flex; align-items: center; border-radius: 9px; font-size: 13px; color: var(--muted); }
   .tabs-desktop a[aria-current="page"] { background: var(--card); color: var(--ink); font-weight: 500; }
+  .grid.cols2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid.cols3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .grid.split { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; }
   .card { padding: 24px; }
