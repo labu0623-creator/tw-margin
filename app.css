@@ -128,3 +128,19 @@ h2.section { font-size: 15px; font-weight: 600; }
   .card { padding: 24px; }
   .chart svg { height: 240px; }
 }
+
+.crash-list { display: flex; flex-direction: column; }
+.crash { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; padding: 16px 0; border-top: 1px solid var(--line); }
+.crash:first-child { border-top: 0; padding-top: 4px; }
+.crash-year { font-size: 24px; font-weight: 300; letter-spacing: -.01em; line-height: 1.2; }
+.crash-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.crash-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.crash-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin-top: 4px; }
+.crash-metrics div { display: flex; flex-direction: column; gap: 2px; }
+.crash-metrics b { font-weight: 400; font-size: 15px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.seg.small { flex-wrap: wrap; }
+@media (min-width: 900px) {
+  .crash { grid-template-columns: 96px minmax(0, 1fr); }
+  .crash-year { font-size: 32px; }
+  .crash-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}

@@ -22,11 +22,16 @@ DATA = os.path.join(ROOT, "data")
 STATE_FILE = os.path.join(DATA, "state.json")
 MARKET_FILE = os.path.join(DATA, "market.json")
 STOCKS_FILE = os.path.join(DATA, "stocks.json")
+TAIEX_FILE = os.path.join(DATA, "taiex.json")
+CRASH_FILE = os.path.join(DATA, "crashes.json")
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 FIN_RATIO = {"TW": 0.6, "OTC": 0.5}   # 融資成數：上市 6 成、上櫃 5 成
 STOCK_HIST = 20                        # 個股保留幾天的估算維持率
-MARKET_KEEP = 500                      # 大盤歷史保留天數
+MARKET_KEEP = 900                      # 大盤歷史保留天數（約 3.5 年）
+HISTORY_YEARS = 3                      # 走勢圖要補齊的年數
+TAIEX_FILE_START = dt.date(1999, 10, 1)
+BUDGET_MIN = float(os.environ.get("BUDGET_MIN", "95"))   # 每次執行補歷史的時間上限（分鐘）
 REQ_GAP = 2.2                          # 每次請求間隔秒數，避免被交易所封鎖
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -39,6 +44,7 @@ except AttributeError:
     pass
 
 _last_req = 0.0
+START = time.time()
 
 
 def log(*a):
@@ -231,28 +237,230 @@ def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
 
-def fear_score(day, history):
+def fear_parts(vol, ratio, chg5, close, ma20, est=False):
     """恐慌溫度 0–100，越高越恐慌。缺的項目自動重新分配權重。"""
     parts = {}
-    if not day.get("vix"):  # 沒有 VIX 就不計算，避免前後定義不一致
-        return None, {}
-    if day.get("vix"):
-        parts["vix"] = (clamp((day["vix"] - 15) / 30 * 100), 0.40)
-    if day.get("allRatio"):
-        parts["ratio"] = (clamp((170 - day["allRatio"]) / 40 * 100), 0.25)
-    past = [h for h in history if h["d"] < day["d"]]
-    if len(past) >= 5 and past[-5].get("allAmt") and day.get("allAmt"):
-        chg = day["allAmt"] / past[-5]["allAmt"] - 1
-        parts["margin"] = (clamp(-chg / 0.08 * 100), 0.15)
-    closes = [h["taiex"] for h in past[-19:] if h.get("taiex")] + ([day["taiex"]] if day.get("taiex") else [])
-    if len(closes) >= 20:
-        ma = sum(closes) / len(closes)
-        parts["trend"] = (clamp(-(day["taiex"] / ma - 1) / 0.08 * 100), 0.20)
-    if not parts:
+    if vol:
+        parts["vix"] = (clamp((vol - 15) / 30 * 100), 0.40)
+    if ratio:
+        parts["ratio"] = (clamp((170 - ratio) / 40 * 100), 0.25)
+    if chg5 is not None:
+        parts["margin"] = (clamp(-chg5 / 0.08 * 100), 0.15)
+    if close and ma20:
+        parts["trend"] = (clamp(-(close / ma20 - 1) / 0.08 * 100), 0.20)
+    if "vix" not in parts or len(parts) < 3:
         return None, {}
     w = sum(p[1] for p in parts.values())
     score = sum(p[0] * p[1] for p in parts.values()) / w
-    return round(score, 1), {k: round(v[0], 1) for k, v in parts.items()}
+    out = {k: round(v[0], 1) for k, v in parts.items()}
+    if est:
+        out["est"] = 1
+    return round(score, 1), out
+
+
+def fear_score(day, history, closes_before):
+    vol, est = (day.get("vix"), False) if day.get("vix") else (day.get("vixEst"), True)
+    past = history
+    chg5 = None
+    if len(past) >= 5 and past[-5].get("allAmt") and day.get("allAmt") and past[-5]["d"] >= ymd(parse_ymd(day["d"]) - dt.timedelta(days=12)):
+        chg5 = day["allAmt"] / past[-5]["allAmt"] - 1
+    ma20 = None
+    if day.get("taiex") and len(closes_before) >= 19:
+        ma20 = (sum(closes_before[-19:]) + day["taiex"]) / 20
+    return fear_parts(vol, day.get("allRatio"), chg5, day.get("taiex"), ma20, est)
+
+
+# ---------------------------------------------------------------- 加權指數、歷史波動率、VIX 估算
+
+def update_taiex(taiex, today):
+    """data/taiex.json：1999 年以來每日加權指數收盤（來自 FMTQIK 月資料）。"""
+    have_months = {k[:6] for k in taiex}
+    m = TAIEX_FILE_START
+    recent = {ymd(today)[:6], ymd(today.replace(day=1) - dt.timedelta(days=1))[:6]}
+    while m <= today:
+        key = ymd(m)[:6]
+        if key not in have_months or key in recent:
+            j = http_get(f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?response=json&date={ymd(m)}")
+            if j and j.get("stat") == "OK":
+                for r in j.get("data", []):
+                    y, mo, da = r[0].strip().split("/")
+                    c = num(r[4])
+                    if c:
+                        taiex[ymd(dt.date(int(y) + 1911, int(mo), int(da)))] = c
+        m = dt.date(m.year + (m.month == 12), m.month % 12 + 1, 1)
+    return dict(sorted(taiex.items()))
+
+
+def hv20_map(taiex):
+    """20 日年化歷史波動率（%）。"""
+    import math
+    keys = list(taiex)
+    rets = [None] + [math.log(taiex[keys[i]] / taiex[keys[i - 1]]) for i in range(1, len(keys))]
+    out = {}
+    for i in range(21, len(keys)):
+        w = rets[i - 19:i + 1]
+        mu = sum(w) / 20
+        out[keys[i]] = (sum((x - mu) ** 2 for x in w) / 19) ** 0.5 * (252 ** 0.5) * 100
+    return out
+
+
+def fit_vix_model(days, hv):
+    pts = [(hv[h["d"]], h["vix"]) for h in days if h.get("vix") and h["d"] in hv]
+    if len(pts) < 30:
+        return None
+    n = len(pts)
+    mx = sum(p[0] for p in pts) / n
+    my = sum(p[1] for p in pts) / n
+    sxx = sum((p[0] - mx) ** 2 for p in pts)
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
+    b = sxy / sxx if sxx else 0
+    a = my - b * mx
+    syy = sum((p[1] - my) ** 2 for p in pts)
+    r2 = (sxy * sxy) / (sxx * syy) if sxx and syy else 0
+    return {"a": round(a, 3), "b": round(b, 3), "n": n, "r2": round(r2, 3)}
+
+
+def est_vix(model, hvv):
+    if not model or hvv is None:
+        return None
+    return round(max(10.0, model["a"] + model["b"] * hvv), 2)
+
+
+# ---------------------------------------------------------------- 只算大盤（補長期歷史、股災用）
+
+def market_ratio(mg, qt):
+    mv = 0.0
+    for code, r in mg["rows"].items():
+        c = qt["px"].get(code, (None, 0))[0]
+        if c:
+            mv += r["bal"] * 1000 * c
+    return mv
+
+
+def light_day(d):
+    """只計算大盤融資維持率（不更新個股成本）。"""
+    tm = twse_margin(d)
+    tq = twse_quotes(d) if tm else None
+    if not (tm and tq):
+        return None
+    om = tpex_margin(d)
+    oq = tpex_quotes(d) if om else None
+    tw_mv = market_ratio(tm, tq)
+    day = {"d": ymd(d), "twRatio": round(tw_mv / tm["amt"] * 100, 2) if tm["amt"] else None, "twAmt": tm["amt"],
+           "otcRatio": None, "otcAmt": None, "allRatio": None, "allAmt": None, "light": 1}
+    if om and oq:
+        otc_mv = market_ratio(om, oq)
+        day["otcRatio"] = round(otc_mv / om["amt"] * 100, 2) if om["amt"] else None
+        day["otcAmt"] = om["amt"]
+        day["allAmt"] = tm["amt"] + om["amt"]
+        day["allRatio"] = round((tw_mv + otc_mv) / day["allAmt"] * 100, 2)
+    return day
+
+
+def margin_amt(d):
+    tm = twse_margin(d)
+    om = tpex_margin(d)
+    if tm and om:
+        return tm["amt"] + om["amt"]
+    return None
+
+
+def fill_history(days_hist, taiex, today, deadline, save_cb):
+    have = {h["d"] for h in days_hist}
+    start = ymd(today - dt.timedelta(days=int(365.25 * HISTORY_YEARS) + 5))
+    todo = [k for k in reversed(list(taiex)) if k >= start and k not in have and k < ymd(today)]
+    if not todo:
+        return days_hist
+    log(f"補長期歷史：還有 {len(todo)} 天")
+    added = 0
+    for k in todo:
+        if time.time() > deadline:
+            log("  到達本次時間上限，下次執行繼續")
+            break
+        day = light_day(parse_ymd(k))
+        if day is None:
+            day = {"d": k, "light": 1, "missing": 1}
+        days_hist.append(day)
+        added += 1
+        if added % 20 == 0:
+            days_hist.sort(key=lambda h: h["d"])
+            save_cb(days_hist)
+            log(f"  已補 {added} 天（目前到 {k}）")
+    days_hist.sort(key=lambda h: h["d"])
+    return days_hist
+
+
+# ---------------------------------------------------------------- 2000 年後股災
+
+CRASHES = [
+    # id, 名稱, 搜尋低點的期間（起, 迄）, 找高點的起始日
+    ("2000", "網路泡沫破裂", "2000-03-01", "2000-12-31", "2000-01-01"),
+    ("2001", "911 恐怖攻擊", "2001-09-01", "2001-10-15", "2001-06-01"),
+    ("2004", "319 槍擊案", "2004-03-19", "2004-03-31", "2004-03-01"),
+    ("2008", "全球金融海嘯", "2008-09-01", "2008-12-31", "2008-05-01"),
+    ("2011", "美債降評、歐債危機", "2011-08-01", "2011-12-31", "2011-07-01"),
+    ("2015", "中國股災", "2015-07-01", "2015-08-31", "2015-04-01"),
+    ("2018", "十月股災", "2018-10-01", "2018-10-31", "2018-09-01"),
+    ("2020", "新冠疫情", "2020-02-01", "2020-03-31", "2020-01-01"),
+    ("2022", "美國升息熊市", "2022-01-01", "2022-10-31", "2022-01-01"),
+    ("2024", "日圓套利平倉", "2024-07-11", "2024-08-31", "2024-07-01"),
+    ("2025", "美國對等關稅", "2025-04-01", "2025-04-30", "2025-01-01"),
+    ("2026-07", "2026 年 7 月修正", "2026-07-01", "2026-08-15", "2026-06-01"),
+    ("2026-11", "2026 年 11 月急跌", "2026-10-15", "2099-12-31", "2026-09-15"),
+]
+
+
+def compute_crashes(taiex, hv, model, today, old):
+    cache = {e["id"]: e for e in (old or {}).get("events", [])}
+    keys = list(taiex)
+    out = []
+    for cid, name, s, e, pf in CRASHES:
+        s, e, pf = s.replace("-", ""), e.replace("-", ""), pf.replace("-", "")
+        if s > ymd(today):
+            continue
+        end = min(e, ymd(today))
+        c = cache.get(cid)
+        fresh = c and end < ymd(today - dt.timedelta(days=30)) and (c.get("ratio") is not None or c["trough"] < "20040211")
+        if fresh:
+            out.append(c)
+            continue
+        win = [k for k in keys if s <= k <= end]
+        if not win:
+            continue
+        trough = min(win, key=lambda k: taiex[k])
+        pre = [k for k in keys if pf <= k <= trough]
+        peak = max(pre, key=lambda k: taiex[k])
+        span = [k for k in keys if peak <= k <= trough]
+        one_day = None
+        for i in range(1, len(span)):
+            r = taiex[span[i]] / taiex[span[i - 1]] - 1
+            if one_day is None or r < one_day[1]:
+                one_day = (span[i], r)
+        ev = {"id": cid, "name": name, "year": cid[:4], "peak": peak, "peakClose": taiex[peak],
+              "trough": trough, "troughClose": taiex[trough], "drop": round((taiex[trough] / taiex[peak] - 1) * 100, 1),
+              "days": len(span) - 1, "ongoing": e > ymd(today),
+              "worstDay": one_day[0] if one_day else None, "worstDayPct": round(one_day[1] * 100, 2) if one_day else None}
+        log(f"股災 {cid} {name}：高點 {peak} → 低點 {trough}（{ev['drop']}%）")
+        td = parse_ymd(trough)
+        day = light_day(td) if trough >= "20010101" else None
+        ev["ratio"] = day and (day.get("allRatio") or None)
+        ev["twRatio"] = day and day.get("twRatio")
+        ev["ratioScope"] = "all" if day and day.get("allRatio") else ("tw" if day and day.get("twRatio") else None)
+        vix_real = vix_close(td) if td >= today - dt.timedelta(days=120) else None
+        ev["vix"] = vix_real
+        ev["vixEst"] = None if vix_real else est_vix(model, hv.get(trough))
+        ev["hv20"] = round(hv[trough], 1) if trough in hv else None
+        chg5 = None
+        i = keys.index(trough)
+        if day and day.get("allAmt") and i >= 5:
+            a5 = margin_amt(parse_ymd(keys[i - 5]))
+            if a5:
+                chg5 = day["allAmt"] / a5 - 1
+        ma20 = sum(taiex[k] for k in keys[i - 19:i + 1]) / 20 if i >= 19 else None
+        ev["fear"], ev["fearParts"] = fear_parts(vix_real or ev["vixEst"], ev["ratio"] or ev["twRatio"], chg5,
+                                                 taiex[trough], ma20, est=not vix_real)
+        out.append(ev)
+    return {"updated": dt.datetime.now(TZ).isoformat(timespec="minutes"), "vixModel": model, "events": out}
 
 
 def process_day(d, cur):
@@ -405,17 +613,58 @@ def main():
     # 補上先前沒抓到的 VIX（近 4 個月內，期交所只提供這段期間的檔案）
     cutoff = ymd(today - dt.timedelta(days=125))
     for h in days_hist:
-        if not h.get("vix") and h["d"] >= cutoff:
+        if not h.get("vix") and not h.get("light") and h["d"] >= cutoff:
             h["vix"] = vix_close(parse_ymd(h["d"]))
             if h["vix"]:
                 log(f"  補上 {h['d']} VIX {h['vix']}")
 
-    for i, h in enumerate(days_hist):
-        h["fear"], h["fearParts"] = fear_score(h, days_hist[:i])
+    # 加權指數長期資料
+    taiex = update_taiex(load(TAIEX_FILE, {}), today)
+    save(TAIEX_FILE, taiex)
+
+    def finish(days_list, final=False):
+        days_list = [h for h in days_list if not h.get("missing")] if final else days_list
+        hv = hv20_map(taiex)
+        model = fit_vix_model(days_list, hv)
+        keys = list(taiex)
+        idx = {k: i for i, k in enumerate(keys)}
+        real = [h for h in days_list if not h.get("missing")]
+        for i, h in enumerate(real):
+            if h["d"] in taiex and h.get("light"):
+                h["taiex"] = taiex[h["d"]]
+                j = idx[h["d"]]
+                if j:
+                    prev = taiex[keys[j - 1]]
+                    h["taiexChg"] = round(h["taiex"] - prev, 2)
+                    h["taiexPct"] = round((h["taiex"] / prev - 1) * 100, 2)
+            h["hv20"] = round(hv[h["d"]], 2) if h["d"] in hv else None
+            h["vixEst"] = None if h.get("vix") else est_vix(model, hv.get(h["d"]))
+            closes_before = [taiex[k] for k in keys[max(0, idx.get(h["d"], 0) - 19):idx.get(h["d"], 0)]] if h["d"] in idx else []
+            h["fear"], h["fearParts"] = fear_score(h, real[:i], closes_before)
+        return days_list, hv, model
+
+    deadline = START + BUDGET_MIN * 60
+
+    def save_market(days_list):
+        save(MARKET_FILE, {"updated": dt.datetime.now(TZ).isoformat(timespec="minutes"),
+                           "days": [h for h in days_list if not h.get("missing")][-MARKET_KEEP:]})
+
+    # 股災表（歷史事件結果會快取）
+    days_hist, hv, model = finish(days_hist)
+    try:
+        crashes = compute_crashes(taiex, hv, model, today, load(CRASH_FILE, None))
+        save(CRASH_FILE, crashes)
+    except Exception as e:  # noqa: BLE001
+        log(f"股災表計算失敗：{e}")
+
+    # 補 3 年走勢
+    days_hist = fill_history(days_hist, taiex, today, deadline, save_market)
+    days_hist, hv, model = finish(days_hist, final=True)
     days_hist = days_hist[-MARKET_KEEP:]
+    log(f"VIX 估算模型：{model}")
 
     save(STATE_FILE, state)
-    save(MARKET_FILE, {"updated": dt.datetime.now(TZ).isoformat(timespec="minutes"), "days": days_hist})
+    save_market(days_hist)
     if latest_stocks:
         save(STOCKS_FILE, {"d": latest_stocks[0],
                            "fields": ["name", "mkt", "close", "chg", "bal", "balChg", "avg", "ratio", "hist"],

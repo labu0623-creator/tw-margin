@@ -24,7 +24,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 130
     permissions:
       contents: write
     steps:
@@ -35,6 +35,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: 抓取資料
+        env:
+          BUDGET_MIN: "95"
         run: |
           N="${{ github.event.inputs.backfill }}"
           if [ -n "$N" ] && [ "$N" != "0" ]; then

@@ -38,6 +38,8 @@
     return st.stocksPromise;
   }
 
+  const RANGES = [["30", "30 日"], ["90", "90 日"], ["365", "1 年"], ["730", "2 年"], ["1095", "3 年"]];
+  if (!RANGES.some(r => r[0] === st.range)) st.range = "90";
   const MK = { all: ["allRatio", "allAmt", "全市場"], tw: ["twRatio", "twAmt", "上市"], otc: ["otcRatio", "otcAmt", "上櫃"] };
 
   // ---------- 圖形
@@ -70,7 +72,7 @@
     id: "f", unit: "", label: "恐慌溫度",
     domain: () => [0, 100],
     lines: [[80, "80 恐慌", "var(--z-danger)"], [60, "60 緊張", "var(--z-warn)"], [40, "40 謹慎", "var(--line)"], [20, "20 平穩", "var(--line)"]],
-    read: (r, v) => `${Math.round(v)} ${fearLabel(v)}${r.vix ? "・VIX " + fmt(r.vix, 2) : ""}`,
+    read: (r, v) => `${Math.round(v)} ${fearLabel(v)}${r.vix ? "・VIX " + fmt(r.vix, 2) : r.vixEst ? "・VIX 約 " + fmt(r.vixEst, 1) + "（估）" : ""}`,
   };
 
   function chartHTML(rows, key, o) {
@@ -121,11 +123,14 @@
     const offDay = last.official ? last.d : [...days].reverse().find(d => d.official)?.d;
     const offPrev = (() => { const ds = days.filter(d => d.official); return ds.length > 1 ? ds[ds.length - 2].official.keepRate : null; })();
     const fear = last.fear, fp = last.fearParts || {};
-    const rangeN = st.range === "all" ? days.length : +st.range;
-    const rows = days.slice(-rangeN);
+    const lastD = parseD(last.d);
+    const cut = new Date(lastD.getTime() - (+st.range) * 86400000);
+    const cutS = `${cut.getFullYear()}${String(cut.getMonth() + 1).padStart(2, "0")}${String(cut.getDate()).padStart(2, "0")}`;
+    const rows = days.filter(d => d.d > cutS);
+    const estInRows = rows.some(r => r.fear != null && r.fearParts && r.fearParts.est);
     const vixPrev = prev.vix;
     const rangeSeg = `<div class="seg small" role="group" aria-label="期間">
-            ${[["30", "30 日"], ["90", "90 日"], ["all", "全部"]].map(([k, t]) => `<button data-range="${k}" aria-pressed="${st.range === k}">${t}</button>`).join("")}
+            ${RANGES.map(([k, t]) => `<button data-range="${k}" aria-pressed="${st.range === k}">${t}</button>`).join("")}
           </div>`;
 
     view.innerHTML = `
@@ -179,6 +184,7 @@
           ${rangeSeg}
         </div>
         ${chartHTML(rows, "fear", FEAR_CHART)}
+        ${estInRows ? `<p class="tiny">期交所免費提供的 VIX 只有近 4 個月，更早的日子用加權指數 20 日歷史波動率換算 VIX 再計算。</p>` : ""}
       </section>
 
       <section class="card">
@@ -189,12 +195,47 @@
         ${chartHTML(rows, rk, RATIO_CHART)}
       </section>
       </div>
-      <p class="note">民間算法＝融資股票市值 ÷ 融資金額，反映單純做多的融資戶壓力；官方數字以整戶計算，兩者定義不同。資料為盤後公布，非即時。</p>`;
+      <p class="note">民間算法＝融資股票市值 ÷ 融資金額，反映單純做多的融資戶壓力；官方數字以整戶計算，兩者定義不同。資料為盤後公布，非即時。</p>
+      <div id="crashes"></div>`;
 
     view.querySelectorAll("[data-mkt]").forEach(b => b.onclick = () => { st.mkt = b.dataset.mkt; remember("mkt", st.mkt); renderOverview(); });
     view.querySelectorAll("[data-range]").forEach(b => b.onclick = () => { st.range = b.dataset.range; remember("range", st.range); renderOverview(); });
+    renderCrashes();
     bindChartHover(rows, "fear", FEAR_CHART);
     bindChartHover(rows, rk, RATIO_CHART);
+  }
+
+  // ---------- 2000 年後股災
+  function ymdSlash(s) { return `${s.slice(0, 4)}/${+s.slice(4, 6)}/${+s.slice(6, 8)}`; }
+  async function renderCrashes() {
+    const box = $("#crashes"); if (!box) return;
+    let c;
+    try { c = st.crashes || (st.crashes = await getJSON("data/crashes.json")); } catch (e) { return; }
+    const ev = [...c.events].sort((a, b) => b.trough.localeCompare(a.trough));
+    const vixCell = e => e.vix != null ? `${fmt(e.vix, 1)}` : e.vixEst != null ? `${fmt(e.vixEst, 1)}<span class="tiny">（估）</span>` : "—";
+    const ratioCell = e => e.ratio != null ? `${fmt(e.ratio)}%` : e.twRatio != null ? `${fmt(e.twRatio)}%<span class="tiny">（上市）</span>` : "—";
+    box.innerHTML = `<section class="card">
+      <div class="card-head"><h2 class="section">2000 年後的股災</h2><span class="tiny">數值為指數低點當天</span></div>
+      <div class="crash-list">
+        ${ev.map(e => {
+          const z = zone(e.ratio ?? e.twRatio);
+          return `<article class="crash">
+            <div class="crash-year">${esc(e.year)}</div>
+            <div class="crash-body">
+              <div class="crash-title"><span class="name">${esc(e.name)}</span>${e.ongoing ? `<span class="pill warn">進行中</span>` : ""}</div>
+              <span class="tiny">${ymdSlash(e.peak)} ${fmt(e.peakClose, 0)} → ${ymdSlash(e.trough)} ${fmt(e.troughClose, 0)}・${e.days} 個交易日${e.worstDayPct != null ? `・單日最大跌幅 ${fmt(e.worstDayPct, 2)}%（${md(e.worstDay)}）` : ""}</span>
+              <div class="crash-metrics">
+                <div><span class="tiny">指數跌幅</span><b class="down">${fmt(e.drop)}%</b></div>
+                <div><span class="tiny">融資維持率</span><b>${ratioCell(e)}${z ? ` <span class="pill ${z[0]}">${z[1]}</span>` : ""}</b></div>
+                <div><span class="tiny">台指 VIX</span><b>${vixCell(e)}</b></div>
+                <div><span class="tiny">恐慌溫度</span><b>${e.fear == null ? "—" : Math.round(e.fear) + " " + fearLabel(e.fear)}</b></div>
+              </div>
+            </div>
+          </article>`;
+        }).join("")}
+      </div>
+      <p class="note">指數跌幅＝期間高點到低點的加權指數收盤跌幅。融資維持率為低點當天全市場（上市＋上櫃）民間算法；證交所個股收盤資料從 2004 年 2 月開始，2000、2001 年無法計算。台指 VIX 從 2006 年才編製，且期交所免費資料只有近 4 個月，標「估」的是用 20 日歷史波動率換算${c.vixModel ? `（以 ${c.vixModel.n} 天實際 VIX 校正）` : ""}，僅供比較。</p>
+    </section>`;
   }
 
   // ---------- 畫面：個股
@@ -310,7 +351,8 @@
       <p><b>大盤融資維持率（民間算法）</b>：所有融資股票的市值 ÷ 融資金額。上市、上櫃用證交所與櫃買中心每日公布的融資餘額與收盤價計算。這個數字反映單純做多的融資戶壓力，和過去財經網站公布的算法相同。</p>
       <p><b>官方全市場擔保維持率</b>：來自證交所「臺股儀表板」，用券商實際帳務以整戶（融資＋融券）計算，涵蓋上市與上櫃，通常比民間算法高。</p>
       <p><b>個股估算維持率</b>：交易所只公布融資張數，沒有公布成本。這裡用每日新增融資張數 × 當天收盤價推算平均成本，再用官方融資總額校正，所以是估計值。</p>
-      <p><b>恐慌溫度（0–100）</b>：台指 VIX 占 40%、全市場融資維持率 25%、加權指數偏離 20 日均線 20%、融資餘額 5 日變化 15%。越高代表市場越恐慌。期交所只提供近 4 個月的 VIX 檔案，所以恐慌溫度從 8 月開始才有歷史。</p>
+      <p><b>恐慌溫度（0–100）</b>：台指 VIX 占 40%、全市場融資維持率 25%、加權指數偏離 20 日均線 20%、融資餘額 5 日變化 15%。越高代表市場越恐慌。期交所免費提供的 VIX 只有近 4 個月，更早的日子用加權指數 20 日歷史波動率換算成 VIX 估計值（用重疊期間的實際 VIX 校正）。</p>
+      <p><b>股災表</b>：列出 2000 年後的重大股災，數值取加權指數低點當天，計算方式和首頁相同。</p>
       <p><b>門檻</b>：166% 約為原始維持率（融資 6 成），150% 是券商常見的預警線，130% 是追繳線。</p>
     </section>
     <section class="card prose">
