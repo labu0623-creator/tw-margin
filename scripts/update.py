@@ -234,6 +234,8 @@ def clamp(x, lo=0.0, hi=100.0):
 def fear_score(day, history):
     """恐慌溫度 0–100，越高越恐慌。缺的項目自動重新分配權重。"""
     parts = {}
+    if not day.get("vix"):  # 沒有 VIX 就不計算，避免前後定義不一致
+        return None, {}
     if day.get("vix"):
         parts["vix"] = (clamp((day["vix"] - 15) / 30 * 100), 0.40)
     if day.get("allRatio"):
