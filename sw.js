@@ -1,5 +1,5 @@
 // 網頁殼層先用快取、資料先抓網路（離線時用上次的資料）
-const CACHE = "twm-v4";
+const CACHE = "twm-v5";
 const SHELL = ["./", "index.html", "app.css", "app.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {

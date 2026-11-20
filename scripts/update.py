@@ -305,6 +305,7 @@ def hv20_map(taiex):
 
 
 def fit_vix_model(days, hv):
+    """用重疊期間的實際 VIX 校正：簡化主軸迴歸（保留變異幅度，極端值比一般迴歸不容易被壓低）。"""
     pts = [(hv[h["d"]], h["vix"]) for h in days if h.get("vix") and h["d"] in hv]
     if len(pts) < 30:
         return None
@@ -312,12 +313,14 @@ def fit_vix_model(days, hv):
     mx = sum(p[0] for p in pts) / n
     my = sum(p[1] for p in pts) / n
     sxx = sum((p[0] - mx) ** 2 for p in pts)
-    sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
-    b = sxy / sxx if sxx else 0
-    a = my - b * mx
     syy = sum((p[1] - my) ** 2 for p in pts)
-    r2 = (sxy * sxy) / (sxx * syy) if sxx and syy else 0
-    return {"a": round(a, 3), "b": round(b, 3), "n": n, "r2": round(r2, 3)}
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
+    if not sxx or not syy:
+        return None
+    b = (syy / sxx) ** 0.5
+    a = my - b * mx
+    r2 = (sxy * sxy) / (sxx * syy)
+    return {"a": round(a, 3), "b": round(b, 3), "n": n, "r2": round(r2, 3), "method": "rma"}
 
 
 def est_vix(model, hvv):
@@ -410,6 +413,9 @@ CRASHES = [
 ]
 
 
+CRASH_VER = 2
+
+
 def compute_crashes(taiex, hv, model, today, old):
     cache = {e["id"]: e for e in (old or {}).get("events", [])}
     keys = list(taiex)
@@ -420,7 +426,8 @@ def compute_crashes(taiex, hv, model, today, old):
             continue
         end = min(e, ymd(today))
         c = cache.get(cid)
-        fresh = c and end < ymd(today - dt.timedelta(days=30)) and (c.get("ratio") is not None or c["trough"] < "20040211")
+        fresh = (c and c.get("v") == CRASH_VER and end < ymd(today - dt.timedelta(days=30))
+                 and (c.get("ratio") is not None or c["trough"] < "20040211"))
         if fresh:
             out.append(c)
             continue
@@ -436,7 +443,7 @@ def compute_crashes(taiex, hv, model, today, old):
             r = taiex[span[i]] / taiex[span[i - 1]] - 1
             if one_day is None or r < one_day[1]:
                 one_day = (span[i], r)
-        ev = {"id": cid, "name": name, "year": cid[:4], "peak": peak, "peakClose": taiex[peak],
+        ev = {"v": CRASH_VER, "id": cid, "name": name, "year": cid[:4], "peak": peak, "peakClose": taiex[peak],
               "trough": trough, "troughClose": taiex[trough], "drop": round((taiex[trough] / taiex[peak] - 1) * 100, 1),
               "days": len(span) - 1, "ongoing": e > ymd(today),
               "worstDay": one_day[0] if one_day else None, "worstDayPct": round(one_day[1] * 100, 2) if one_day else None}
