@@ -29,6 +29,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main   # 一律從最新的 main 開始，避免和前一次的資料提交衝突
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
