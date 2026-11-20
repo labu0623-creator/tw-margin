@@ -192,7 +192,12 @@ def vix_close(d):
                         vals[parts[0].strip()] = v
         _vix_cache[m] = vals
     v = _vix_cache[m].get(ymd(d))
-    if v is None and d >= dt.datetime.now(TZ).date() - dt.timedelta(days=3):
+    return v if v is not None else _vix_daily(d)
+
+
+def _vix_daily(d):
+    v = None
+    if d >= dt.datetime.now(TZ).date() - dt.timedelta(days=45):
         raw = http_get(f"https://www.taifex.com.tw/cht/7/getVixData?filesname={ymd(d)}", raw=True, tries=2)
         if raw:
             lines = [ln for ln in raw.decode("big5", errors="ignore").splitlines() if ln.startswith(ymd(d))]
@@ -394,6 +399,14 @@ def main():
         days_hist = [h for h in days_hist if h["d"] != key] + [day]
         days_hist.sort(key=lambda h: h["d"])
         latest_stocks = (key, stocks)
+
+    # 補上先前沒抓到的 VIX（近 4 個月內，期交所只提供這段期間的檔案）
+    cutoff = ymd(today - dt.timedelta(days=125))
+    for h in days_hist:
+        if not h.get("vix") and h["d"] >= cutoff:
+            h["vix"] = vix_close(parse_ymd(h["d"]))
+            if h["vix"]:
+                log(f"  補上 {h['d']} VIX {h['vix']}")
 
     for i, h in enumerate(days_hist):
         h["fear"], h["fearParts"] = fear_score(h, days_hist[:i])
